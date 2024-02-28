@@ -4,7 +4,7 @@
 #include "Adafruit_MCP9600.h"
 #include "PID_v1.h"
 
-#define I2C_ADDRESS (0x67)
+#define MCP_I2C_ADDRESS (0x67)
 
 Adafruit_MCP9600 mcp;
 
@@ -23,8 +23,8 @@ byte aggSP = 10;
 bool AdaptiveMode = false;
 
 bool PIDMode_2 = true;
-double Setpoint_2 = 100; //PID2
-double Kp_2 = 1, Ki_2 = .0005,  Kd_2 = 0;
+double Setpoint_2 = 125; //PID2
+double Kp_2 = .5, Ki_2 = .0005,  Kd_2 = 0;
 double aggKp_2 = 2, aggKi_2 = 6, aggKd_2 = 0.1;
 byte aggSP_2 = 10;
 bool AdaptiveMode_2 = false;
@@ -34,7 +34,7 @@ bool SSRArmed = true;
 
 float dC = 0.0;
 bool ELEMENT = false;
-int dCLoopTime = 10; // Duty cycle total loop time in seconds.
+int dCLoopTime = 1; // Duty cycle total loop time in seconds.
 unsigned long ElementONTime = 0;
 unsigned long ElementOFFTime = 0;
 #define ElementPowerPin 5
@@ -44,7 +44,7 @@ unsigned long ElementOFFTime = 0;
 
 float dC2 = 0.0;
 bool ELEMENT2 = false;
-int dCLoopTime2 = 10; // Duty cycle total loop time in seconds.
+int dCLoopTime2 = 1; // Duty cycle total loop time in seconds.
 unsigned long ElementONTime2 = 0;
 unsigned long ElementOFFTime2 = 0;
 #define ElementPowerPin2 6
@@ -59,6 +59,43 @@ PID myPID_2( &Input_2, &Output_2, &Setpoint_2, Kp_2, Ki_2, Kd_2, DIRECT );
 unsigned long last_loop_time = 0;
 unsigned long last_loop_time_3 = 0;
 
+//===================
+// Using I2C to send and receive structs between two Arduinos
+//   SDA is the data connection and SCL is the clock connection
+//   On an Uno  SDA is A4 and SCL is A5
+//   On an Mega SDA is 20 and SCL is 21
+//   GNDs must also be connected
+//===================
+
+
+        // data to be sent and received
+struct I2cTxStruct {
+    char textA[16];        // 16 bytes
+    double valA;           //  4
+    unsigned long valB;    //  4
+    byte padding[8];       //  8
+                           //------
+                           // 32
+};
+
+struct I2cRxStruct {
+    char textB[16];        // 16 bytes
+    double valC;           //  4
+    unsigned long valD;    //  4
+    byte padding[8];       //  8
+                           //------
+                           // 32
+};
+
+I2cTxStruct txData = {"xxx", 236, 0};
+I2cRxStruct rxData;
+
+bool newTxData = false;
+bool newRxData = false;
+bool rqSent = false;
+
+const byte thisAddress = 9; // these need to be swapped for the other Arduino
+const byte otherAddress = 8;
 
 void setup()
 {
@@ -71,23 +108,17 @@ void setup()
   myPID.SetSampleTime(1000);
   myPID.SetMode(MANUAL);
 
-
   myPID_2.SetOutputLimits(0, 5);
   myPID_2.SetSampleTime(1000);
   myPID_2.SetMode(MANUAL);
 
-  
-
   Serial.begin(9600);
-  while (!Serial) {
-      delay(10);
-    }
   Serial.println("PID v1.0.0.1 akp");
 
   /* Initialise the driver with I2C_ADDRESS and the default I2C bus. */
-  if (! mcp.begin(I2C_ADDRESS)) {
-        Serial.println("Sensor not found. Check wiring!");
-        while (1);
+  if (! mcp.begin(MCP_I2C_ADDRESS)) {
+      Serial.println("Sensor not found. Check wiring!");
+      while (1);
     }
 
   Serial.println("Found MCP9600!");
@@ -103,18 +134,6 @@ void setup()
   Serial.println(" bits");
 
   mcp.setThermocoupleType(MCP9600_TYPE_K);
-  // Serial.print("Thermocouple type set to ");
-  // switch (mcp.getThermocoupleType()) {
-  //   case MCP9600_TYPE_K:  Serial.print("K"); break;
-  //   case MCP9600_TYPE_J:  Serial.print("J"); break;
-  //   case MCP9600_TYPE_T:  Serial.print("T"); break;
-  //   case MCP9600_TYPE_N:  Serial.print("N"); break;
-  //   case MCP9600_TYPE_S:  Serial.print("S"); break;
-  //   case MCP9600_TYPE_E:  Serial.print("E"); break;
-  //   case MCP9600_TYPE_B:  Serial.print("B"); break;
-  //   case MCP9600_TYPE_R:  Serial.print("R"); break;
-  // }
-  //Serial.println(" type");
 
   mcp.setFilterCoefficient(3);
   //Serial.print("Filter coefficient value set to: ");
@@ -128,12 +147,26 @@ void setup()
   mcp.enable(true);
 
 
-myPID_2.SetMode(AUTOMATIC);
+  myPID_2.SetMode(AUTOMATIC);
+
+  Wire.begin(thisAddress); // join i2c bus
+  Wire.onReceive(receiveEvent); // register function to be called when a message arrives
+  Wire.onRequest(requestEvent); // register function to be called when a request arrives
 
 }
 
 void loop()
 {
+  // this bit checks if a message has been received
+  if (newRxData == true) {
+    showNewData();
+    newRxData = false;
+  }
+  // this function updates the data in txData
+  // this function sends the data if one is ready to be sent
+  updateDataToSend();
+
+
   // get PID inputs, set agg constants, send LCD vars
   if ((millis() - last_loop_time) > 1000)  {
     Input_2 = ((mcp.readThermocouple()*9)/5)+32; // TESTI
@@ -235,4 +268,56 @@ void DutyCycleLoop() {
     ElementONTime2 = 0;
     ELEMENT2 = HIGH;
   }
+}
+
+void updateDataToSend() {
+  // update the data after the previous message has been
+  //    sent in response to the request
+  // this ensures the new data will ready when the next request arrives
+  if (rqSent == true) {
+    rqSent = false;
+    char sText[] = "yyy";
+    strcpy(txData.textA, sText);
+    txData.valA = Input_2;
+    txData.valB = millis();
+  }
+}
+
+void showTxData() {
+  // for demo show the data that as been sent
+  Serial.print("Sent ");
+  Serial.print(txData.textA);
+  Serial.print(' ');
+  Serial.print(txData.valA);
+  Serial.print(' ');
+  Serial.println(txData.valB);
+}
+
+void showNewData() {
+  Serial.print("This just in    ");
+  Serial.print(rxData.textB);
+  Serial.print(' ');
+  Serial.print(rxData.valC);
+  Serial.print(' ');
+  Serial.println(rxData.valD);
+}
+
+// this function is called by the Wire library when a message is received
+void receiveEvent(int numBytesReceived) {
+  if (newRxData == false) {
+    // copy the data to rxData
+    Wire.readBytes( (byte*) &rxData, numBytesReceived);
+    newRxData = true;
+  }
+  else {
+    // dump the data if we havent seen the last message
+    while(Wire.available() > 0) {
+      byte c = Wire.read();
+    }
+  }
+}
+
+void requestEvent() {
+  Wire.write((byte*) &txData, sizeof(txData));
+  rqSent = true;
 }
