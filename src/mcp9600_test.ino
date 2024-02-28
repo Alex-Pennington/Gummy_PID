@@ -1,5 +1,3 @@
-#define pinNozzel 4
-
 #include <Wire.h>
 #include <Adafruit_I2CDevice.h>
 #include <Adafruit_I2CRegister.h>
@@ -26,11 +24,11 @@ bool AdaptiveMode = false;
 
 bool PIDMode_2 = true;
 double Setpoint_2 = 100; //PID2
-double Kp_2 = 2.219, Ki_2 = 0.0005,  Kd_2 = 0;
-double aggKp_2 = 1, aggKi_2 = 0, aggKd_2 = 0;
+double Kp_2 = 1, Ki_2 = .0005,  Kd_2 = 0;
+double aggKp_2 = 2, aggKi_2 = 6, aggKd_2 = 0.1;
 byte aggSP_2 = 10;
 bool AdaptiveMode_2 = false;
-bool SSRArmed = false;
+bool SSRArmed = true;
 
 //Duty Cycle
 
@@ -49,12 +47,12 @@ bool ELEMENT2 = false;
 int dCLoopTime2 = 10; // Duty cycle total loop time in seconds.
 unsigned long ElementONTime2 = 0;
 unsigned long ElementOFFTime2 = 0;
-#define ElementPowerPin2 4
+#define ElementPowerPin2 6
 
 // Specify the links and initial tuning parameters
 // PID myPID(&Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
 PID myPID( &Input, &Output, &Setpoint, Kp, Ki, Kd, DIRECT);
-PID myPID_2( &Input_2, &Output_2, &Setpoint_2, Kp_2, Ki_2, Kd_2, DIRECT);
+PID myPID_2( &Input_2, &Output_2, &Setpoint_2, Kp_2, Ki_2, Kd_2, DIRECT );
 
 
 //Timer variables
@@ -67,7 +65,20 @@ void setup()
 
   pinMode(ElementPowerPin, OUTPUT);
   pinMode(ElementPowerPin2, OUTPUT);
-  Serial.begin(115200);
+
+  //turn the PID on
+  myPID.SetOutputLimits(0, 99);
+  myPID.SetSampleTime(1000);
+  myPID.SetMode(MANUAL);
+
+
+  myPID_2.SetOutputLimits(0, 5);
+  myPID_2.SetSampleTime(1000);
+  myPID_2.SetMode(MANUAL);
+
+  
+
+  Serial.begin(9600);
   while (!Serial) {
       delay(10);
     }
@@ -116,28 +127,19 @@ void setup()
 
   mcp.enable(true);
 
-  //Serial.println(F("------------------------------"));
+
+myPID_2.SetMode(AUTOMATIC);
+
 }
 
 void loop()
 {
-  Serial.print("Element 1 - Nozzel "); Serial.println(((mcp.readThermocouple()*9)/5)+32);
-  //Serial.print("Cold Junction: "); Serial.println(((mcp.readAmbient()*9)/5)+32);
-  //Serial.print("ADC: "); Serial.print(mcp.readADC() * 2); Serial.println(" uV");
-  //delay(1000);
-  //digitalWrite(pinNozzel, HIGH); // sets the digital pin 13 on
-  //delay(10000);            // waits for a second
-  //digitalWrite(pinNozzel, LOW);  // sets the digital pin 13 off
-  //delay(1000); 
-
   // get PID inputs, set agg constants, send LCD vars
-  if ((millis() - last_loop_time) > 10000)  {
-    Input_2 = 100; // TESTI
-    Serial.print("Input PID2 :");
-    Serial.println(Input_2);
+  if ((millis() - last_loop_time) > 1000)  {
+    Input_2 = ((mcp.readThermocouple()*9)/5)+32; // TESTI
     Input = ((mcp.readThermocouple()*9)/5)+32;
-    Serial.print("Lower Spool Input PID1:");
-    Serial.println(Input);
+    Serial.print("Input PID2 : ");
+    Serial.println(Input_2);
 
     gap = abs(Setpoint - Input); //distance away from setpoint
     if ((gap < aggSP && AdaptiveMode == true) || AdaptiveMode == false)
@@ -166,9 +168,10 @@ void loop()
   myPID.Compute();
   myPID_2.Compute();
 
-
-  if ( (millis() - last_loop_time_3) > 10000) { // dC Calc
+  if ( (millis() - last_loop_time_3) > 1000) { // dC Calc
     if (PIDMode == true) {
+      Serial.print("Input PID1 : ");
+      Serial.println(Input);
       Serial.print("Output : ");
       Serial.println(Output);
       dC = (Output / 100.0);
@@ -179,5 +182,57 @@ void loop()
       dC2 = (Output_2 / 100.0);
     }
     last_loop_time_3 = millis();
+  }
+
+  DutyCycleLoop();
+}
+
+void DutyCycleLoop() {
+
+  if ((dC > 0 && SSRArmed == true)  && (PIDMode == true)) {
+    if (!ELEMENT) {
+      if ((millis() - ElementONTime) > (dC * dCLoopTime * 1000)) {
+        ElementOFFTime = millis();
+        ElementONTime = 0;
+        digitalWrite(ElementPowerPin, HIGH);
+        ELEMENT = HIGH;
+      }
+    } else {
+      if ((millis() - ElementOFFTime) > ((1 - dC) * dCLoopTime * 1000)) {
+        ElementONTime = millis();
+        ElementOFFTime = 0;
+        digitalWrite(ElementPowerPin, LOW);
+        ELEMENT = LOW;
+      }
+    }
+  } else {
+    digitalWrite(ElementPowerPin, HIGH);
+    ElementONTime = 0;
+    ELEMENT = HIGH;
+  }
+
+  if ((dC2 > 0 && SSRArmed == true) && ( PIDMode_2 == true )) {
+    if (!ELEMENT2) {
+      if ((millis() - ElementONTime2) > (dC2 * dCLoopTime2 * 1000)) {
+        ElementOFFTime2 = millis();
+        ElementONTime2 = 0;
+        digitalWrite(ElementPowerPin2, !HIGH);
+        digitalWrite(LED_BUILTIN, !HIGH);
+        ELEMENT2 = HIGH;
+      }
+    } else {
+      if ((millis() - ElementOFFTime2) > ((1 - dC2) * dCLoopTime2 * 1000)) {
+        ElementONTime2 = millis();
+        ElementOFFTime2 = 0;
+        digitalWrite(ElementPowerPin2, !LOW);
+        digitalWrite(LED_BUILTIN, !LOW);
+        ELEMENT2 = LOW;
+      }
+    }
+  } else {
+    digitalWrite(ElementPowerPin2, !HIGH);
+    digitalWrite(LED_BUILTIN, !HIGH);
+    ElementONTime2 = 0;
+    ELEMENT2 = HIGH;
   }
 }
